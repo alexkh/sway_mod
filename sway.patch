@@ -1,0 +1,178 @@
+diff '--color=auto' -Narup sway_unmod/sway/input/seatop_default.c sway_mod/sway/input/seatop_default.c
+--- sway_unmod/sway/input/seatop_default.c	2025-05-08 15:48:10.989547673 -0400
++++ sway_mod/sway/input/seatop_default.c	2025-05-08 16:04:52.134755267 -0400
+@@ -457,7 +457,10 @@ static void handle_button(struct sway_se
+ 	// Handle beginning floating move
+ 	if (cont && is_floating_or_child && !is_fullscreen_or_child &&
+ 			state == WL_POINTER_BUTTON_STATE_PRESSED &&
+-			(mod_move_btn_pressed || titlebar_left_btn_pressed)) {
++			(mod_move_btn_pressed || titlebar_left_btn_pressed ||
++			button == 278 || button == 276)) {
++		seat_set_focus_container(seat,
++			seat_get_focus_inactive_view(seat, &cont->node));
+ 		seatop_begin_move_floating(seat, container_toplevel_ancestor(cont));
+ 		return;
+ 	}
+@@ -486,6 +489,12 @@ static void handle_button(struct sway_se
+ 		}
+ 	}
+ 
++	if (cont && (button == 278 || button == 276) && state ==
++			WL_POINTER_BUTTON_STATE_PRESSED) {
++		seatop_begin_move_tiling_threshold(seat, cont);
++		return;
++	}
++
+ 	// Handle moving a tiling container
+ 	if (config->tiling_drag && (mod_move_btn_pressed || titlebar_left_btn_pressed) &&
+ 			state == WL_POINTER_BUTTON_STATE_PRESSED && !is_floating_or_child &&
+diff '--color=auto' -Narup sway_unmod/sway/input/seatop_move_floating.c sway_mod/sway/input/seatop_move_floating.c
+--- sway_unmod/sway/input/seatop_move_floating.c	2025-05-08 15:48:10.989603063 -0400
++++ sway_mod/sway/input/seatop_move_floating.c	2025-05-08 16:20:55.419067060 -0400
+@@ -1,4 +1,9 @@
+ #include <wlr/types/wlr_cursor.h>
++#include <libevdev/libevdev.h>
++#include <signal.h>
++#include <sway/tree/view.h>
++#include "sway/input/cursor.h"
++#include "log.h"
+ #include "sway/desktop/transaction.h"
+ #include "sway/input/cursor.h"
+ #include "sway/input/seat.h"
+@@ -24,6 +29,13 @@ static void handle_button(struct sway_se
+ 		enum wl_pointer_button_state state) {
+ 	if (seat->cursor->pressed_button_count == 0) {
+ 		finalize_move(seat);
++	} else if(state == WL_POINTER_BUTTON_STATE_PRESSED
++			&& button == BTN_RIGHT) {
++		struct seatop_move_floating_event *e = seat->seatop_data;
++		struct sway_container *floater = container_toplevel_ancestor(
++				e->con);
++		seatop_begin_resize_floating(seat, floater,
++				WLR_EDGE_RIGHT | WLR_EDGE_BOTTOM);
+ 	}
+ }
+ 
+@@ -41,6 +53,36 @@ static void handle_pointer_motion(struct
+ 	transaction_commit_dirty();
+ }
+ 
++
++static void close_container_iterator(struct sway_container *con, void *data) {
++	if (con->view) {
++		view_close(con->view);
++	}
++}
++
++static void handle_pointer_axis(struct sway_seat *seat,
++		struct wlr_pointer_axis_event *event) {
++	sway_log(SWAY_ERROR, "Floating handle_pointer_axis 2, %d %d",
++		event->orientation, event->delta_discrete);
++
++	struct seatop_move_floating_event *e = seat->seatop_data;
++
++	if(event->orientation == 0) {
++//		finalize_move(seat);
++		if(event->delta_discrete > 0) {
++			close_container_iterator(e->con, NULL);
++			container_for_each_child(e->con, close_container_iterator,
++					NULL);
++		} else {
++			sway_log(SWAY_ERROR, "Killing process %d",
++				e->con->view->pid);
++			kill(e->con->view->pid, SIGKILL);
++		}
++		seatop_begin_default(seat);
++		return;
++	}
++}
++
+ static void handle_unref(struct sway_seat *seat, struct sway_container *con) {
+ 	struct seatop_move_floating_event *e = seat->seatop_data;
+ 	if (e->con == con) {
+@@ -51,6 +93,7 @@ static void handle_unref(struct sway_sea
+ static const struct sway_seatop_impl seatop_impl = {
+ 	.button = handle_button,
+ 	.pointer_motion = handle_pointer_motion,
++	.pointer_axis = handle_pointer_axis,
+ 	.tablet_tool_tip = handle_tablet_tool_tip,
+ 	.unref = handle_unref,
+ };
+diff '--color=auto' -Narup sway_unmod/sway/input/seatop_move_tiling.c sway_mod/sway/input/seatop_move_tiling.c
+--- sway_unmod/sway/input/seatop_move_tiling.c	2025-05-08 15:48:10.989620912 -0400
++++ sway_mod/sway/input/seatop_move_tiling.c	2025-05-08 16:25:21.017121585 -0400
+@@ -1,6 +1,8 @@
+ #include <limits.h>
+ #include <wlr/types/wlr_cursor.h>
+ #include <wlr/util/edges.h>
++#include <signal.h>
++#include "log.h"
+ #include "sway/desktop/transaction.h"
+ #include "sway/input/cursor.h"
+ #include "sway/input/seat.h"
+@@ -312,6 +314,35 @@ static void handle_pointer_motion(struct
+ 	transaction_commit_dirty();
+ }
+ 
++static void close_container_iterator(struct sway_container *con, void *data) {
++	if (con->view) {
++		view_close(con->view);
++	}
++}
++
++static void handle_pointer_axis(struct sway_seat *seat,
++		struct wlr_pointer_axis_event *event) {
++	sway_log(SWAY_ERROR, "Tiling handle_pointer_axis 2, %d %d",
++		event->orientation, event->delta_discrete);
++
++	struct seatop_move_tiling_event *e = seat->seatop_data;
++
++	if(event->orientation == 0) {
++//		finalize_move(seat);
++		if(event->delta_discrete > 0) {
++			close_container_iterator(e->con, NULL);
++			container_for_each_child(e->con, close_container_iterator,
++					NULL);
++		} else {
++			sway_log(SWAY_ERROR, "Killing process %d",
++				e->con->view->pid);
++			kill(e->con->view->pid, SIGKILL);
++		}
++		seatop_begin_default(seat);
++		return;
++	}
++}
++
+ static bool is_parallel(enum sway_container_layout layout,
+ 		enum wlr_edges edge) {
+ 	bool layout_is_horiz = layout == L_HORIZ || layout == L_TABBED;
+@@ -432,6 +463,7 @@ static void handle_unref(struct sway_sea
+ static const struct sway_seatop_impl seatop_impl = {
+ 	.button = handle_button,
+ 	.pointer_motion = handle_pointer_motion,
++	.pointer_axis = handle_pointer_axis,
+ 	.tablet_tool_tip = handle_tablet_tool_tip,
+ 	.unref = handle_unref,
+ 	.end = handle_end,
+diff '--color=auto' -Narup sway_unmod/sway/input/seatop_resize_floating.c sway_mod/sway/input/seatop_resize_floating.c
+--- sway_unmod/sway/input/seatop_resize_floating.c	2025-05-08 15:48:10.989644622 -0400
++++ sway_mod/sway/input/seatop_resize_floating.c	2025-05-08 16:27:29.744693999 -0400
+@@ -1,4 +1,5 @@
+ #include <limits.h>
++#include <libevdev/libevdev.h>
+ #include <wlr/types/wlr_cursor.h>
+ #include <wlr/types/wlr_xcursor_manager.h>
+ #include "sway/desktop/transaction.h"
+@@ -29,6 +30,12 @@ static void handle_button(struct sway_se
+ 		arrange_container(con); // Send configure w/o resizing hint
+ 		transaction_commit_dirty();
+ 		seatop_begin_default(seat);
++	} else if(state == WL_POINTER_BUTTON_STATE_RELEASED &&
++			button == BTN_RIGHT) {
++		container_set_resizing(con, false);
++		arrange_container(con); // Send configure w/o resizing hint
++		transaction_commit_dirty();
++		seatop_begin_move_floating(seat, con);
+ 	}
+ }
+ 
